@@ -516,6 +516,29 @@ function setOrderStatus(orderId, target, opts = {}) {
   return { ok:true, msg:\`状态已更新：\${old} → \${target}\` };
 }
 
+// 子订单独立流转（与主单状态机解耦），主单状态随后按子单聚合
+function setItemStatus(orderId, itemIndex, target, opts = {}) {
+  const o = S.orders.find(x => x.id === orderId);
+  if (!o) return { ok:false, msg:'订单不存在' };
+  const it = o.items[itemIndex];
+  if (!it) return { ok:false, msg:'子订单不存在' };
+  if (it.status === target) return { ok:false, msg:'子单状态未变化' };
+  const ITEM_TRANSITIONS = Seed.ITEM_TRANSITIONS;
+  const force = opts.force === true;
+  if (!force && !(ITEM_TRANSITIONS[it.status] || []).includes(target))
+    return { ok:false, msg:\`子单非法流转：\${it.status} → \${target}（调试模式可强制）\` };
+  const old = it.status;
+  it.status = target;
+  o.version++;
+  const before = o.status;
+  o.status = Seed.aggregateOrderStatus(o); // 主单状态由子单聚合，禁止直接写
+  log(old === 'SHIPPED' && target === 'COMPLETED' ? 'OK' : 'INFO',
+    \`子单 \${it.productId} \${old} → \${target}；主单 \${before} → \${o.status}\${o.status!==before?'（聚合）':''}\`);
+  save();
+  return { ok:true, msg:\`子单 \${it.productId}：\${old} → \${target}\` +
+    (o.status !== before ? \`；主单聚合为 \${o.status}\` : '') };
+}
+
 // 拆单：按供应商 + 最大余额法分摊（金额守恒）
 function splitOrder(parentId) {
   const o = S.orders.find(x => x.id === parentId);
@@ -893,7 +916,10 @@ function renderOrders() {
 
 function showOrderDetail(id) {
   const o = S.orders.find(x=>x.id===id); if (!o) return;
-  const items = o.items.map(it => \`<tr><td class="mono">\${it.productId}</td><td>\${esc(it.supplier)}</td><td class="mono">\${money(it.amount)}</td><td>\${badge(it.status)}</td></tr>\`).join('');
+  const agg = Seed.aggregateOrderStatus(o);
+  const items = o.items.map((it, i) => \`<tr style="cursor:pointer" onclick="showItemDetail('\${id}',\${i})" title="点击查看子单独立状态机">
+    <td class="mono">\${esc(it.productId)}</td><td>\${esc(it.supplier)}</td>
+    <td class="mono">\${money(it.amount)}</td><td>\${badge(it.status)}</td><td style="color:var(--accent)">›</td></tr>\`).join('');
   const buttons = [];
   if (o.status === 'CREATED') buttons.push({label:'模拟支付', cls:'primary', onClick:()=>{ const r=payOrder(id); toast(r.msg,!r.ok); render(); return r.ok; }});
   if (['COMPLETED','SETTLED'].includes(o.status)) buttons.push({label:'生成分账指令', cls:'primary', onClick:()=>{ const r=createSplit(id); toast(r.msg,!r.ok); render(); return r.ok; }});
@@ -905,7 +931,7 @@ function showOrderDetail(id) {
       <div class="k">订单号</div><div class="mono">\${esc(o.id)}</div>
       <div class="k">买家</div><div class="mono">\${esc(o.userId)}</div>
       <div class="k">实付金额</div><div class="mono" style="color:var(--accent);font-weight:600">\${money(o.amount)}</div>
-      <div class="k">履约状态</div><div>\${badge(o.status)}</div>
+      <div class="k">履约状态</div><div>\${badge(o.status)} <span style="font-size:10.5px;color:var(--text-3)">（子单聚合：\${STATE_LABEL[agg]||agg}\${agg!==o.status?' · 建议同步':''}）</span></div>
       <div class="k">支付状态</div><div class="mono">\${o.payStatus}</div>
       <div class="k">退款状态</div><div class="mono">\${o.refundStatus}</div>
       <div class="k">乐观锁版本</div><div class="mono">v\${o.version}</div>
@@ -913,11 +939,40 @@ function showOrderDetail(id) {
     </div>
     <div class="section-label">状态机流转</div>
     \${orderFlow(o.status)}
-    <div class="section-label">子订单 · 最大余额法分摊</div>
-    <div class="scroll"><table><thead><tr><th>商品</th><th>供应商</th><th>分摊金额</th><th>状态</th></tr></thead><tbody>\${items}</tbody></table></div>
+    <div class="section-label">子订单 · 点击任意行查看独立状态机</div>
+    <div class="scroll"><table><thead><tr><th>商品</th><th>供应商</th><th>分摊金额</th><th>状态</th><th></th></tr></thead><tbody>\${items}</tbody></table></div>
     \${o.items.length>1?\`<div class="btn-row" style="margin-top:14px"><button class="btn" onclick="doSplit('\${id}')">执行拆单校验</button></div>\`:''}\`, buttons);
 }
 function doSplit(id) { const r = splitOrder(id); toast(r.msg, !r.ok); render(); }
+
+/** A2：子单独立状态机查看与流转，主单状态由子单聚合自动回写 */
+function showItemDetail(orderId, index) {
+  const o = S.orders.find(x=>x.id===orderId); if (!o) return;
+  const it = o.items[index]; if (!it) return;
+  const targets = Seed.ITEM_TRANSITIONS[it.status] || [];
+  const opts = targets.length
+    ? targets.map(t => \`<option value="\${t}">\${t} · \${STATE_LABEL[t]||t}</option>\`).join('')
+    : '<option value="">（终态，无后继）</option>';
+  const buttons = targets.length
+    ? [{label:'推进子单状态', cls:'primary', onClick:()=>{
+        const t = $('#itemTarget').value; if (!t) return false;
+        const r = setItemStatus(orderId, index, t); toast(r.msg, !r.ok); render(); return r.ok;
+      }}]
+    : [];
+  buttons.push({label:'关闭', cls:''});
+  openModal(\`子订单 · \${esc(it.productId)}\`, \`
+    <div class="kv">
+      <div class="k">所属主单</div><div class="mono">\${esc(orderId)}</div>
+      <div class="k">供应商</div><div>\${esc(it.supplier)}</div>
+      <div class="k">分摊金额</div><div class="mono" style="color:var(--accent)">\${money(it.amount)}</div>
+      <div class="k">当前状态</div><div>\${badge(it.status)}</div>
+      <div class="k">主单状态</div><div>\${badge(o.status)}</div>
+    </div>
+    <div class="section-label">子单独立状态机</div>
+    \${flowFor(it.status, ['CREATED','PAID','ACCEPTED','SHIPPED','COMPLETED','SETTLED'], ['待付款','已付款','已接单','已发货','已完成','已结算'])}
+    <div class="field" style="margin-top:16px"><label>流转目标（合法后继）</label><select id="itemTarget">\${opts}</select></div>
+    <p class="hint">子单独立流转；每次变更会增加主单乐观锁版本，并按「主订单状态聚合规则」自动回写主单状态（禁止直接修改主单）。</p>\`, buttons);
+}
 ` },
   "/js/pages2.js": { contentType: "application/javascript; charset=UTF-8", body: `/* ========== 页面渲染：资金 / 对账 / 佣金 / 调试（Apple 视觉） ========== */
 
@@ -1213,6 +1268,35 @@ function renderDebugLog(){
     CLOSED: [], CANCELLED: [],
   };
 
+  // 子订单状态机（按供应商独立流转，与主单解耦）
+  const ITEM_TRANSITIONS = {
+    CREATED: ['PAID', 'CANCELLED'],
+    PAID: ['ACCEPTED', 'AFTER_SALE_PENDING'],
+    ACCEPTED: ['SHIPPED', 'AFTER_SALE_PENDING'],
+    SHIPPED: ['COMPLETED', 'AFTER_SALE_PENDING'],
+    COMPLETED: ['SETTLED', 'AFTER_SALE_PENDING'],
+    SETTLED: ['AFTER_SALE_PENDING'],
+    AFTER_SALE_PENDING: ['REFUNDING', 'SHIPPED', 'COMPLETED', 'SETTLED'],
+    REFUNDING: ['CLOSED'],
+    CLOSED: [], CANCELLED: [],
+  };
+
+  /**
+   * 主订单状态聚合：禁止直接修改主单状态，由子单状态按规则计算。
+   * 规则源自 D3 文档「主订单状态聚合规则表」。
+   */
+  function aggregateOrderStatus(order) {
+    const ss = order.items.map(i => i.status);
+    const all = (pred) => ss.length > 0 && ss.every(pred);
+    if (all(s => s === 'CLOSED' || s === 'CANCELLED')) return 'CLOSED';
+    if (all(s => s === 'CREATED')) return 'CREATED';
+    if (all(s => s === 'SETTLED' || s === 'COMPLETED')) return 'COMPLETED';
+    if (all(s => ['SHIPPED', 'COMPLETED', 'SETTLED'].includes(s))) return 'SHIPPED';
+    if (ss.some(s => s === 'SHIPPED' || s === 'COMPLETED' || s === 'SETTLED')) return 'PART_SHIPPED';
+    if (all(s => ['PAID', 'ACCEPTED'].includes(s))) return 'PAID';
+    return order.status; // 无明确规则时保持原值（兼容演示种子）
+  }
+
   // 60/20/10/10 分账规则；末条用最大余额法兜底，保证 Σ = 订单金额
   const SPLIT_RULES = [
     { receiver: 'VA_S1001', role: 'SUPPLIER', bps: 6000, memo: '供货货款 60%' },
@@ -1327,8 +1411,8 @@ function renderDebugLog(){
       detail: \`GMV(\${m.gmv}) = 冻结(\${m.frozen}) + 已划拨(\${m.allocated})\` };
   }
 
-  return { PAY_SUCCESS, BASE_TIME, TRANSITIONS, SPLIT_RULES,
-    createSeedState, mkOrder, mkItem, metrics, assertInvariant };
+  return { PAY_SUCCESS, BASE_TIME, TRANSITIONS, ITEM_TRANSITIONS, SPLIT_RULES,
+    createSeedState, mkOrder, mkItem, metrics, assertInvariant, aggregateOrderStatus };
 });
 ` },
   "/js/state.js": { contentType: "application/javascript; charset=UTF-8", body: `/* ========== 全局状态层：种子数据 + 持久化 + 核心业务动作 ========== */
@@ -1338,7 +1422,7 @@ const ORDER_STATES = ['CREATED','PAID','ACCEPTED','SHIPPED','COMPLETED','SETTLED
 const SPLIT_STATES = ['INIT','PUSHING','ACCEPTED','PROCESSING','SUCCESS','PART_SUCCESS','FREEZE','REVOKED','FAILED'];
 const STATE_LABEL = {
   CREATED:'待付款', PAID:'已付款/待发货', ACCEPTED:'已接单', SHIPPED:'已发货',
-  COMPLETED:'已完成', SETTLED:'已结算', AFTER_SALE_PENDING:'售后中', REFUNDING:'退款中',
+  PART_SHIPPED:'部分发货', COMPLETED:'已完成', SETTLED:'已结算', AFTER_SALE_PENDING:'售后中', REFUNDING:'退款中',
   CLOSED:'已关闭', CANCELLED:'已取消'
 };
 const STATE_CLASS = {

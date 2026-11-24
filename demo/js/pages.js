@@ -133,7 +133,10 @@ function renderOrders() {
 
 function showOrderDetail(id) {
   const o = S.orders.find(x=>x.id===id); if (!o) return;
-  const items = o.items.map(it => `<tr><td class="mono">${it.productId}</td><td>${esc(it.supplier)}</td><td class="mono">${money(it.amount)}</td><td>${badge(it.status)}</td></tr>`).join('');
+  const agg = Seed.aggregateOrderStatus(o);
+  const items = o.items.map((it, i) => `<tr style="cursor:pointer" onclick="showItemDetail('${id}',${i})" title="点击查看子单独立状态机">
+    <td class="mono">${esc(it.productId)}</td><td>${esc(it.supplier)}</td>
+    <td class="mono">${money(it.amount)}</td><td>${badge(it.status)}</td><td style="color:var(--accent)">›</td></tr>`).join('');
   const buttons = [];
   if (o.status === 'CREATED') buttons.push({label:'模拟支付', cls:'primary', onClick:()=>{ const r=payOrder(id); toast(r.msg,!r.ok); render(); return r.ok; }});
   if (['COMPLETED','SETTLED'].includes(o.status)) buttons.push({label:'生成分账指令', cls:'primary', onClick:()=>{ const r=createSplit(id); toast(r.msg,!r.ok); render(); return r.ok; }});
@@ -145,7 +148,7 @@ function showOrderDetail(id) {
       <div class="k">订单号</div><div class="mono">${esc(o.id)}</div>
       <div class="k">买家</div><div class="mono">${esc(o.userId)}</div>
       <div class="k">实付金额</div><div class="mono" style="color:var(--accent);font-weight:600">${money(o.amount)}</div>
-      <div class="k">履约状态</div><div>${badge(o.status)}</div>
+      <div class="k">履约状态</div><div>${badge(o.status)} <span style="font-size:10.5px;color:var(--text-3)">（子单聚合：${STATE_LABEL[agg]||agg}${agg!==o.status?' · 建议同步':''}）</span></div>
       <div class="k">支付状态</div><div class="mono">${o.payStatus}</div>
       <div class="k">退款状态</div><div class="mono">${o.refundStatus}</div>
       <div class="k">乐观锁版本</div><div class="mono">v${o.version}</div>
@@ -153,8 +156,37 @@ function showOrderDetail(id) {
     </div>
     <div class="section-label">状态机流转</div>
     ${orderFlow(o.status)}
-    <div class="section-label">子订单 · 最大余额法分摊</div>
-    <div class="scroll"><table><thead><tr><th>商品</th><th>供应商</th><th>分摊金额</th><th>状态</th></tr></thead><tbody>${items}</tbody></table></div>
+    <div class="section-label">子订单 · 点击任意行查看独立状态机</div>
+    <div class="scroll"><table><thead><tr><th>商品</th><th>供应商</th><th>分摊金额</th><th>状态</th><th></th></tr></thead><tbody>${items}</tbody></table></div>
     ${o.items.length>1?`<div class="btn-row" style="margin-top:14px"><button class="btn" onclick="doSplit('${id}')">执行拆单校验</button></div>`:''}`, buttons);
 }
 function doSplit(id) { const r = splitOrder(id); toast(r.msg, !r.ok); render(); }
+
+/** A2：子单独立状态机查看与流转，主单状态由子单聚合自动回写 */
+function showItemDetail(orderId, index) {
+  const o = S.orders.find(x=>x.id===orderId); if (!o) return;
+  const it = o.items[index]; if (!it) return;
+  const targets = Seed.ITEM_TRANSITIONS[it.status] || [];
+  const opts = targets.length
+    ? targets.map(t => `<option value="${t}">${t} · ${STATE_LABEL[t]||t}</option>`).join('')
+    : '<option value="">（终态，无后继）</option>';
+  const buttons = targets.length
+    ? [{label:'推进子单状态', cls:'primary', onClick:()=>{
+        const t = $('#itemTarget').value; if (!t) return false;
+        const r = setItemStatus(orderId, index, t); toast(r.msg, !r.ok); render(); return r.ok;
+      }}]
+    : [];
+  buttons.push({label:'关闭', cls:''});
+  openModal(`子订单 · ${esc(it.productId)}`, `
+    <div class="kv">
+      <div class="k">所属主单</div><div class="mono">${esc(orderId)}</div>
+      <div class="k">供应商</div><div>${esc(it.supplier)}</div>
+      <div class="k">分摊金额</div><div class="mono" style="color:var(--accent)">${money(it.amount)}</div>
+      <div class="k">当前状态</div><div>${badge(it.status)}</div>
+      <div class="k">主单状态</div><div>${badge(o.status)}</div>
+    </div>
+    <div class="section-label">子单独立状态机</div>
+    ${flowFor(it.status, ['CREATED','PAID','ACCEPTED','SHIPPED','COMPLETED','SETTLED'], ['待付款','已付款','已接单','已发货','已完成','已结算'])}
+    <div class="field" style="margin-top:16px"><label>流转目标（合法后继）</label><select id="itemTarget">${opts}</select></div>
+    <p class="hint">子单独立流转；每次变更会增加主单乐观锁版本，并按「主订单状态聚合规则」自动回写主单状态（禁止直接修改主单）。</p>`, buttons);
+}

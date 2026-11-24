@@ -34,6 +34,29 @@ function setOrderStatus(orderId, target, opts = {}) {
   return { ok:true, msg:`状态已更新：${old} → ${target}` };
 }
 
+// 子订单独立流转（与主单状态机解耦），主单状态随后按子单聚合
+function setItemStatus(orderId, itemIndex, target, opts = {}) {
+  const o = S.orders.find(x => x.id === orderId);
+  if (!o) return { ok:false, msg:'订单不存在' };
+  const it = o.items[itemIndex];
+  if (!it) return { ok:false, msg:'子订单不存在' };
+  if (it.status === target) return { ok:false, msg:'子单状态未变化' };
+  const ITEM_TRANSITIONS = Seed.ITEM_TRANSITIONS;
+  const force = opts.force === true;
+  if (!force && !(ITEM_TRANSITIONS[it.status] || []).includes(target))
+    return { ok:false, msg:`子单非法流转：${it.status} → ${target}（调试模式可强制）` };
+  const old = it.status;
+  it.status = target;
+  o.version++;
+  const before = o.status;
+  o.status = Seed.aggregateOrderStatus(o); // 主单状态由子单聚合，禁止直接写
+  log(old === 'SHIPPED' && target === 'COMPLETED' ? 'OK' : 'INFO',
+    `子单 ${it.productId} ${old} → ${target}；主单 ${before} → ${o.status}${o.status!==before?'（聚合）':''}`);
+  save();
+  return { ok:true, msg:`子单 ${it.productId}：${old} → ${target}` +
+    (o.status !== before ? `；主单聚合为 ${o.status}` : '') };
+}
+
 // 拆单：按供应商 + 最大余额法分摊（金额守恒）
 function splitOrder(parentId) {
   const o = S.orders.find(x => x.id === parentId);

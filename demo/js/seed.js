@@ -31,6 +31,35 @@
     CLOSED: [], CANCELLED: [],
   };
 
+  // 子订单状态机（按供应商独立流转，与主单解耦）
+  const ITEM_TRANSITIONS = {
+    CREATED: ['PAID', 'CANCELLED'],
+    PAID: ['ACCEPTED', 'AFTER_SALE_PENDING'],
+    ACCEPTED: ['SHIPPED', 'AFTER_SALE_PENDING'],
+    SHIPPED: ['COMPLETED', 'AFTER_SALE_PENDING'],
+    COMPLETED: ['SETTLED', 'AFTER_SALE_PENDING'],
+    SETTLED: ['AFTER_SALE_PENDING'],
+    AFTER_SALE_PENDING: ['REFUNDING', 'SHIPPED', 'COMPLETED', 'SETTLED'],
+    REFUNDING: ['CLOSED'],
+    CLOSED: [], CANCELLED: [],
+  };
+
+  /**
+   * 主订单状态聚合：禁止直接修改主单状态，由子单状态按规则计算。
+   * 规则源自 D3 文档「主订单状态聚合规则表」。
+   */
+  function aggregateOrderStatus(order) {
+    const ss = order.items.map(i => i.status);
+    const all = (pred) => ss.length > 0 && ss.every(pred);
+    if (all(s => s === 'CLOSED' || s === 'CANCELLED')) return 'CLOSED';
+    if (all(s => s === 'CREATED')) return 'CREATED';
+    if (all(s => s === 'SETTLED' || s === 'COMPLETED')) return 'COMPLETED';
+    if (all(s => ['SHIPPED', 'COMPLETED', 'SETTLED'].includes(s))) return 'SHIPPED';
+    if (ss.some(s => s === 'SHIPPED' || s === 'COMPLETED' || s === 'SETTLED')) return 'PART_SHIPPED';
+    if (all(s => ['PAID', 'ACCEPTED'].includes(s))) return 'PAID';
+    return order.status; // 无明确规则时保持原值（兼容演示种子）
+  }
+
   // 60/20/10/10 分账规则；末条用最大余额法兜底，保证 Σ = 订单金额
   const SPLIT_RULES = [
     { receiver: 'VA_S1001', role: 'SUPPLIER', bps: 6000, memo: '供货货款 60%' },
@@ -145,6 +174,6 @@
       detail: `GMV(${m.gmv}) = 冻结(${m.frozen}) + 已划拨(${m.allocated})` };
   }
 
-  return { PAY_SUCCESS, BASE_TIME, TRANSITIONS, SPLIT_RULES,
-    createSeedState, mkOrder, mkItem, metrics, assertInvariant };
+  return { PAY_SUCCESS, BASE_TIME, TRANSITIONS, ITEM_TRANSITIONS, SPLIT_RULES,
+    createSeedState, mkOrder, mkItem, metrics, assertInvariant, aggregateOrderStatus };
 });
