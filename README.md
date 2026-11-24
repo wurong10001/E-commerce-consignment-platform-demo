@@ -17,7 +17,10 @@
 │       ├── pages2.js         # 页面渲染：资金/对账/佣金/调试
 │       └── app.js            # 应用入口与路由
 ├── src/
-│   └── index.ts              # Cloudflare Worker 演示 API（独立后端，纯内存数据库）
+│   ├── index.ts              # Worker 入口：/ → 完整 Demo，/api/* → REST 接口
+│   └── assets.ts             # 由 demo/ 打包生成的内嵌静态资源（自动生成，勿手改）
+├── scripts/
+│   └── bundle-assets.mjs     # 把 demo/ 打包进 src/assets.ts
 ├── wrangler.toml             # Worker 最小配置（无 account_id）
 └── README.md
 ```
@@ -71,15 +74,22 @@ POST /api/idempotent               幂等键生成（唯一性校验）
 GET  /api/stats                    统计汇总
 ```
 
-### 部署（网页端，推荐）
+### 部署（网页端，推荐）—— 访问域名即可使用完整 Demo
+
+本仓库部署后是**一个全栈 Worker**：访问根路径 `https://<你的 Worker 域名>/` 直接看到并使用完整交互式 Demo，`/api/*` 是独立 REST 接口。
 
 1. 将本仓库推送到 GitHub（仓库名：`E-commerce-consignment-platform-demo`）。
 2. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages** → **Create** → **Worker** → **Import from Git**。
-3. 选择该 GitHub 仓库；Cloudflare 网页会自动识别 `wrangler.toml` 与 `src/index.ts` 入口并完成配置（无需手动填写 account_id 或绑定）。
-4. 点击 **Deploy**，部署完成后获得 `https://ecommerce-consignment-demo-api.<你的子域>.workers.dev`。
-5. 访问 `/health` 验证服务返回 `status: UP`。
+3. 选择该 GitHub 仓库；Cloudflare 网页会自动识别 `wrangler.toml` 与 `src/index.ts` 入口并完成配置（无需手动填写 account_id 或任何绑定）。
+4. 点击 **Deploy**，部署完成后获得 `https://ecommerce-consignment-demo.<你的子域>.workers.dev`。
+5. 浏览器打开该域名 —— 即可看到 Apple Liquid Glass 风格的交互式 Demo（宽屏=桌面版，窄屏=触摸版，按分辨率自动切换）。
 
-> 本 Worker 为纯内存演示 API：Worker 重启后数据恢复初始种子状态，符合演示用途。前端 Demo 自成一体（localStorage），不依赖 Worker 运行。
+> **前端资源如何进入 Worker**：`src/assets.ts` 由 `scripts/bundle-assets.mjs` 从 `demo/` 打包生成。若修改了 `demo/` 下的前端文件，重新打包后再部署：
+> ```bash
+> node scripts/bundle-assets.mjs   # 重新生成 src/assets.ts
+> git add -A && git commit -m "update demo" && git push
+> ```
+> 验证接口：访问 `/health` 返回 `status: UP`；`GET /api/stats` 返回统计汇总。Worker 重启后数据恢复初始种子状态（纯内存），符合演示用途。
 
 ## 三、契约依据
 

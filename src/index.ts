@@ -1,11 +1,11 @@
 /**
- * 电商代销平台 · Cloudflare Worker 演示 API（独立后端）
+ * 电商代销平台 · Cloudflare Worker（单工作者全栈演示）
  * ------------------------------------------------------------------
- * 纯内存数据库（无 KV / 无外部依赖），用于简历展示：订单状态机、分账、
- * 冲正、退款、幂等、UNKNOWN 兜底、对账、佣金等 REST 接口。
+ * 访问域名根路径 → 完整交互式 Demo（Apple Liquid Glass 视觉，桌面/触摸双布局）
+ * /api/* → 独立 REST 演示接口（纯内存数据库，无 KV / 无外部依赖）
  *
- * 部署：在 Cloudflare 网页端 Import GitHub 仓库后自动识别为 Worker，
- *       入口文件 src/index.ts，无需在代码中配置 account_id。
+ * 静态资源来自 src/assets.ts，由 scripts/bundle-assets.mjs 从 demo/ 打包生成。
+ * 修改前端后请先运行：node scripts/bundle-assets.mjs，再部署 Worker。
  *
  * 契约依据：《统一契约字典》P0-1~P0-4：
  *   - 订单三维状态 order_status / pay_status / refund_status 独立
@@ -13,6 +13,8 @@
  *   - 幂等键由平台统一生成 {PREFIX}_{bizKey}_{seq}
  *   - 金额一律用「分」（整数）
  */
+
+import { assets } from './assets';
 
 /* ==================== 类型 ==================== */
 type OrderStatus =
@@ -108,9 +110,23 @@ export default {
         'Access-Control-Allow-Headers': 'Content-Type',
       } });
     }
-    if (path === '/' || path === '/health') {
-      return ok({ service: 'dsx-worker-api', version: '1.0.0', status: 'UP',
-        note: '电商代销平台演示 API（内存数据库）', endpoints: [
+    // ---- 静态资源：访问域名即看到完整交互式 Demo ----
+    const assetPath = path === '/index.html' ? '/' : path;
+    const asset = assets[assetPath];
+    if (asset) {
+      return new Response(asset.body, {
+        headers: {
+          'Content-Type': asset.contentType,
+          'Cache-Control': 'no-cache',
+          'Access-Control-Allow-Origin': '*',
+        },
+      });
+    }
+
+    if (path === '/health') {
+      return ok({ service: 'dsx-worker', version: '1.0.0', status: 'UP',
+        demo: 'GET / → 完整交互式 Demo（Apple Liquid Glass）',
+        api: [
           'GET /api/orders', 'GET /api/orders/:id', 'POST /api/orders/:id/status',
           'POST /api/orders/:id/pay', 'POST /api/orders/:id/refund',
           'POST /api/orders/:id/split', 'GET /api/splits', 'POST /api/splits/:id/push',
