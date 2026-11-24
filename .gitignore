@@ -1,0 +1,13 @@
+# 编译产物
+contract-tests/out/
+*.class
+
+# 运行时 / IDE
+node_modules/
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Cloudflare 本地状态
+.wrangler/

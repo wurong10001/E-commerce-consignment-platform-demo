@@ -1,0 +1,9 @@
+# Cloudflare Worker 配置（最小）
+# 在 Cloudflare 网页端 Import 此 GitHub 仓库时，网页会自动识别 Worker 并完成部署。
+# 本文件不写 account_id —— 由网页端自动配置，避免泄露账号信息。
+name = "ecommerce-consignment-demo-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-24"
+
+# 纯内存数据库：不使用 KV / D1 / 任何绑定。
+# 生产环境可按需添加 [vars] 或 D1 绑定，本演示项目不需要。
