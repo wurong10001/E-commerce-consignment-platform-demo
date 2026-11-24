@@ -47,14 +47,27 @@ let orders: Order[] = [
   mkOrder('DSO20261124000124', 'u_1004', 8900, 'CREATED', 'INIT'),
   mkOrder('DSO20261124000120', 'u_1005', 19900, 'REFUNDING', 'SUCCESS'),
 ];
-let splits: Split[] = [
-  mkSplit('SP000005', 'DSO20261124000122', 'VA_S1002', 39560, 'SUCCESS'),
-  mkSplit('SP000006', 'DSO20261124000122', 'VA_D2031', 13160, 'SUCCESS'),
-  mkSplit('SP000007', 'DSO20261124000121', 'VA_S1001', 17940, 'ACCEPTED'),
-];
+// 与 demo/js/seed.js 同源：60/20/10/10 最大余额法，末条兜底，Σ = 订单金额
+const SPLIT_RULES = [
+  ['VA_S1001', 6000], ['VA_D2031', 2000], ['VA_P0001', 1000], ['VA_RESERVE', 1000],
+] as const;
+function buildSeedSplits(): Split[] {
+  const out: Split[] = [];
+  let n = 0;
+  for (const order of orders.filter(o => o.id === 'DSO20261124000121' || o.id === 'DSO20261124000122')) {
+    let allocated = 0;
+    SPLIT_RULES.forEach(([receiver, bps], i) => {
+      const amount = i === SPLIT_RULES.length - 1 ? order.amount - allocated : Math.round(order.amount * bps / 10000);
+      allocated += amount;
+      out.push(mkSplit('SP' + String(++n).padStart(6, '0'), order.id, receiver, amount, 'SUCCESS'));
+    });
+  }
+  return out;
+}
+let splits: Split[] = buildSeedSplits();
 let ledger: Ledger[] = splits.map(s => ({
   id: 'LG' + s.id.slice(2), bizOrderId: s.orderId, account: s.receiver,
-  type: 'SPLIT_ACCOUNT', amount: s.amount, status: s.status === 'SUCCESS' ? 1 : 0,
+  type: 'SPLIT_ACCOUNT', amount: s.amount, status: 1,
   idempotentKey: s.idempotentKey, createdAt: s.createdAt,
 }));
 let seq = 7;
@@ -254,10 +267,16 @@ export default {
 
       // ---- 统计 ----
       if (path === '/api/stats' && method === 'GET') {
-        const paid = orders.filter(o => o.payStatus === 'SUCCESS');
+        // 口径与 demo/js/seed.js 的 metrics() 一致：gmv = frozen + allocated
+        const paid = orders.filter(o => o.payStatus === 'SUCCESS' && o.orderStatus !== 'CLOSED' && o.orderStatus !== 'CANCELLED');
+        const gmv = paid.reduce((a, o) => a + o.amount, 0);
+        const allocated = ledger.filter(l => l.status === 1 && l.type === 'SPLIT_ACCOUNT')
+          .reduce((a, l) => a + l.amount, 0);
+        const frozen = gmv - allocated;
         const splitSuccess = splits.filter(s => s.status === 'SUCCESS');
         return ok({
-          gmv: paid.reduce((a, o) => a + o.amount, 0), gmvLabel: money(paid.reduce((a, o) => a + o.amount, 0)),
+          gmv, gmvLabel: money(gmv), allocated, frozen,
+          invariant: gmv === frozen + allocated,
           orderCount: orders.length, paidCount: paid.length,
           splitCount: splits.length, splitSuccessCount: splitSuccess.length,
           splitSuccessRate: splits.length ? Math.round(splitSuccess.length / splits.length * 100) + '%' : '0%',

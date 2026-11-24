@@ -23,10 +23,13 @@ function moreEntries() {
 }
 
 function renderDashboard() {
-  const totalGmv = S.orders.filter(o => o.payStatus === 'SUCCESS').reduce((a,o) => a+o.amount, 0);
-  const paid = S.orders.filter(o => o.payStatus === 'SUCCESS').length;
-  const splitSuccess = S.splits.filter(s => s.status === 'SUCCESS').length;
-  const pendingRecon = S.reconciles.filter(r => r.status === 'PENDING').length;
+  // 所有资金指标来自唯一种子真源 metrics()，杜绝同一指标多算法（G1/G2/G3）
+  const M = Seed.metrics(S);
+  const inv = Seed.assertInvariant(S);
+  const totalGmv = M.gmv;
+  const paid = M.paidCount;
+  const splitSuccess = M.splitSuccess;
+  const pendingRecon = M.pendingRecon;
   const lowStock = S.products.filter(p => p.stock < 50).length;
 
   let h = `<section>
@@ -50,15 +53,16 @@ function renderDashboard() {
       <span>${badge(s)}</span><span class="mono" style="color:var(--text-2)">${n} 单</span></div>
     <div class="bar"><i style="width:${n/max*100}%"></i></div></div>`).join('') + `</div></div>`;
 
-  // 资金健康
-  const frozen = S.orders.filter(o=>o.payStatus==='SUCCESS'&&!['CLOSED','CANCELLED'].includes(o.status)).reduce((a,o)=>a+o.amount,0);
-  const splitTotal = S.ledger.filter(l=>l.status===1&&l.type==='SPLIT_ACCOUNT').reduce((a,l)=>a+l.amount,0);
+  // 资金健康：冻结 = GMV − 已划拨（差额法），两页同源同值
+  const frozen = M.frozen;
+  const splitTotal = M.allocated;
   h += `<div class="panel"><div class="panel-head"><h3>资金流健康</h3><span class="sub">监管户一清架构</span></div>
     <div style="padding:18px clamp(17px,2.5vw,24px)">
       <div class="kv">
         <div class="k">合规架构</div><div style="color:#248a3d">✓ 资金不经过平台账户</div>
         <div class="k">监管户冻结</div><div class="mono">${money(frozen)}</div>
         <div class="k">已划拨资金</div><div class="mono">${money(splitTotal)}</div>
+        <div class="k">守恒校验</div><div class="mono" style="color:${inv.ok?'#248a3d':'#d70015'}">${inv.ok?'✓ PASS':'✗ FAIL'} ${esc(inv.detail)}</div>
         <div class="k">库存预警</div><div>${lowStock ? `<span style="color:var(--heat)">${lowStock} 个 SKU 低于 50</span>` : '<span style="color:#248a3d">正常</span>'}</div>
       </div>
       <div class="divider"></div>

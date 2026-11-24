@@ -1,17 +1,8 @@
 /* ========== 核心业务动作（全部基于内存状态，操作后自动持久化） ========== */
 
 // 合法状态流转表（受控状态机，禁止跨态跳变）
-const TRANSITIONS = {
-  CREATED:['PAID','CANCELLED'],
-  PAID:['ACCEPTED','AFTER_SALE_PENDING','CANCELLED'],
-  ACCEPTED:['SHIPPED','AFTER_SALE_PENDING'],
-  SHIPPED:['COMPLETED','AFTER_SALE_PENDING'],
-  COMPLETED:['SETTLED','AFTER_SALE_PENDING'],
-  SETTLED:['AFTER_SALE_PENDING'],
-  AFTER_SALE_PENDING:['REFUNDING','SHIPPED','COMPLETED','SETTLED'],
-  REFUNDING:['CLOSED','COMPLETED','SETTLED'],
-  CLOSED:[], CANCELLED:[],
-};
+// 状态机流转表来自唯一种子真源，避免与推演脚本重复定义
+const TRANSITIONS = Seed.TRANSITIONS;
 const EVENT_FOR = {
   PAID:'PAY_SUCCESS', ACCEPTED:'ACCEPT', SHIPPED:'SHIP', COMPLETED:'CONFIRM_RECEIPT',
   SETTLED:'SETTLE', AFTER_SALE_PENDING:'DISPUTE_OPEN', REFUNDING:'REFUND_APPLY',
@@ -30,7 +21,7 @@ function setOrderStatus(orderId, target, opts = {}) {
   o.version++;
 
   // 支付状态联动
-  if (target === 'PAID' || (TRANSITIONS.PAID.includes(target) && old === 'CREATED')) o.payStatus = 'SUCCESS';
+  if (target === 'PAID' || (TRANSITIONS.PAID.includes(target) && old === 'CREATED')) o.payStatus = Seed.PAY_SUCCESS;
   if (target === 'CANCELLED') o.payStatus = 'CLOSED';
   if (target === 'REFUNDING') o.refundStatus = 'REFUNDING';
   if (target === 'CLOSED') o.refundStatus = 'REFUNDED';
@@ -127,7 +118,12 @@ function refundOrder(orderId, full = true) {
   const related = S.splits.filter(s => s.orderId === orderId && ['SUCCESS','ACCEPTED','PROCESSING','PART_SUCCESS'].includes(s.status));
   let msg = '';
   if (related.length) {
-    related.forEach(s => { s.status = 'REVOKED'; log('WARN', `分账回退 ${s.id} → REVOKED（资金收回监管户）`); });
+    related.forEach(s => {
+      s.status = 'REVOKED';
+      // 冲正同步回退资金账本，避免 allocated 虚高破坏 GMV=冻结+已划拨
+      S.ledger.filter(l => l.key === s.key).forEach(l => { l.status = 0; });
+      log('WARN', `分账回退 ${s.id} → REVOKED（资金收回监管户，账本同步回退）`);
+    });
     msg = `已回退 ${related.length} 笔分账 → `;
   }
   o.status = 'REFUNDING'; o.refundStatus = 'REFUNDING'; o.version++;

@@ -8,19 +8,30 @@
 .
 ├── demo/                     # 前端交互 Demo（纯静态，零依赖，localStorage 持久化）
 │   ├── index.html
-│   ├── css/styles.css
+│   ├── seed.js               # 文档入口：re-export js/seed.js（Node 侧）
+│   ├── full_chain_demo.js    # 全链路 8 步推演脚本（每步断言资金守恒）
+│   ├── css/{tokens,styles}.css
 │   └── js/
-│       ├── state.js          # 种子数据 + 持久化
+│       ├── seed.js           # ★ 唯一种子真源：createSeedState/metrics/assertInvariant
+│       ├── state.js          # 持久化 + 日志（种子来自 seed.js）
 │       ├── actions.js        # 核心业务动作（状态机/分账/冲正/退款/对账/佣金）
 │       ├── utils.js          # UI 辅助（徽章/模态框/状态机可视化）
-│       ├── pages.js          # 页面渲染：总览/商品/订单
-│       ├── pages2.js         # 页面渲染：资金/对账/佣金/调试
+│       ├── pages.js          # 页面渲染：总览/商品/订单（指标走 metrics）
+│       ├── pages2.js         # 页面渲染：资金/对账/佣金/调试（含四象限筛选/级差试算/三道防线）
 │       └── app.js            # 应用入口与路由
+├── reconciliation/           # 对账四象限 + 级差佣金（本地 SQLite）
+│   ├── 01_schema_and_seed.sql
+│   ├── 02_reconcile_quadrants.sql
+│   ├── 03_commission_tier.sql
+│   └── build_and_run.py      # python3 运行，四象限各命中 1 条
+├── commission/
+│   └── CommissionTier.java   # 级差佣金算法（输出与 SQL 严格一致）
 ├── src/
 │   ├── index.ts              # Worker 入口：/ → 完整 Demo，/api/* → REST 接口
 │   └── assets.ts             # 由 demo/ 打包生成的内嵌静态资源（自动生成，勿手改）
 ├── scripts/
 │   └── bundle-assets.mjs     # 把 demo/ 打包进 src/assets.ts
+├── contract-tests/           # 渠道适配器契约测试（Java，8/8 通过）
 ├── wrangler.toml             # Worker 最小配置（无 account_id）
 └── README.md
 ```
@@ -91,13 +102,35 @@ GET  /api/stats                    统计汇总
 > ```
 > 验证接口：访问 `/health` 返回 `status: UP`；`GET /api/stats` 返回统计汇总。Worker 重启后数据恢复初始种子状态（纯内存），符合演示用途。
 
-## 三、设计依据
+## 三、配套落地件与验证
+
+所有指标来自 `demo/js/seed.js` 的 `metrics()`，恒满足不变量 **GMV = 冻结 + 已划拨**（金额一律用整数分）。
+
+```bash
+# 1) 全链路推演：8 步，每步断言资金守恒
+node demo/full_chain_demo.js
+
+# 2) 对账四象限 + 级差佣金（本地内存 SQLite，无第三方依赖）
+python3 reconciliation/build_and_run.py
+# 预期：Q1~Q4 各命中 1 条；佣金 一级500/二级500/三级1000 分，合计 2000 分
+
+# 3) Java 级差算法（输出与上面 SQL 严格一致）
+cd commission && javac CommissionTier.java && java CommissionTier && cd ..
+
+# 4) 渠道契约测试
+cd contract-tests && bash run.sh   # 8/8 通过
+
+# 5) 前端改动后重新打包进 Worker
+node scripts/bundle-assets.mjs
+```
+
+## 四、设计依据
 
 本项目实现遵循一套完整的代销平台契约（订单状态分层、分账状态机、幂等键规范、四层对账、级差佣金等）。相关需求与设计文档仅在本地 `doc/` 目录保留，不纳入本演示仓库。
 
 `contract-tests/` 保留了可运行的契约测试（8/8 通过），用于验证平台统一契约与渠道字段映射的一致性。
 
-## 四、演示建议（给老板看的顺序）
+## 五、演示建议（给老板看的顺序）
 
 1. **总览看板** → 展示 GMV、资金健康、全链路概览。
 2. **订单中心** → 打开订单详情，展示状态机流转图、拆单金额守恒。
