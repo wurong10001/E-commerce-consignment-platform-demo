@@ -72,18 +72,22 @@ python3 -m http.server 8080
 GET  /health                       服务信息
 GET  /api/orders                   订单列表
 GET  /api/orders/:id               订单详情
-POST /api/orders/:id/status        调整订单状态（支持 force:true 强制跨态）
+POST /api/orders/:id/status        调整订单状态（支持 force:true 强制跨态，仅合法状态白名单）
 POST /api/orders/:id/pay           模拟支付
-POST /api/orders/:id/refund        退款（先冲正后退款）
-POST /api/orders/:id/split         生成分账指令（最大余额法）
+POST /api/orders/:id/refund        退款（先冲正并回退账本，再退款）
+POST /api/orders/:id/split         生成分账指令（末条兜底，幂等键注册）
 GET  /api/splits                   分账指令列表
-POST /api/splits/:id/push          推送分账
-POST /api/splits/:id/settle        确认到账
+POST /api/splits/:id/push          推送分账 INIT → PUSHING
+POST /api/splits/:id/accept        渠道受理 PUSHING → ACCEPTED（此时计入已划拨）
+POST /api/splits/:id/settle        确认到账 ACCEPTED → SUCCESS
 POST /api/splits/:id/freeze        冻结/解冻
 GET  /api/ledger                   资金流水账本
 POST /api/idempotent               幂等键生成（唯一性校验）
-GET  /api/stats                    统计汇总
+GET  /api/stats                    统计汇总（invariant 含 frozen >= 0 校验）
 ```
+
+除 `/api/idempotent` 外的写接口（POST）请求体需携带当前资源的 `version`（订单/分账指令），不匹配返回 `409`；
+状态流转校验来自统一状态表，`force:true` 只能跳过流转校验，不能写入非法状态字符串。
 
 ### 部署（网页端，推荐）—— 访问域名即可使用完整 Demo
 
@@ -101,6 +105,18 @@ GET  /api/stats                    统计汇总
 > git add -A && git commit -m "update demo" && git push
 > ```
 > 验证接口：访问 `/health` 返回 `status: UP`；`GET /api/stats` 返回统计汇总。Worker 重启后数据恢复初始种子状态（纯内存），符合演示用途。
+
+### 可选安全配置（无需改代码）
+
+在 Cloudflare Dashboard → Worker → Settings → Variables and Secrets 配置（或通过 `wrangler secret put`）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `DEMO_API_TOKEN` | 配置后，所有 `POST /api/*` 必须带 `Authorization: Bearer <token>`；未配置则保持演示开箱即用 |
+| `ALLOWED_ORIGIN` | 允许跨域的 Origin 白名单（逗号分隔）；未配置时不返回 `Access-Control-Allow-Origin` |
+
+未配置 token 时，Worker 仍对写接口做每 IP 60 次/分钟的轻量限流、输入校验与安全响应头。
+纯内存状态由同一 isolate 的访客共享，仅适合演示；生产环境需接入持久化存储与真实鉴权。
 
 ## 三、配套落地件与验证
 

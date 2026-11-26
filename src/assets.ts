@@ -507,8 +507,8 @@ function setOrderStatus(orderId, target, opts = {}) {
   if (target === 'CANCELLED') o.payStatus = 'CLOSED';
   if (target === 'REFUNDING') o.refundStatus = 'REFUNDING';
   if (target === 'CLOSED') o.refundStatus = 'REFUNDED';
-  // 子订单状态联动
-  o.items.forEach(it => { it.status = target; });
+  // 子订单状态联动（PART_SHIPPED 是主单聚合态，不写入子单）
+  if (Seed.ITEM_TRANSITIONS[target]) o.items.forEach(it => { it.status = target; });
 
   log(target === 'CANCELLED' || target === 'CLOSED' ? 'WARN' : 'OK',
       \`订单 \${shortId(orderId)} 状态 \${old} → \${target}\${force ? ' [调试强制]' : ''}\`);
@@ -539,7 +539,7 @@ function setItemStatus(orderId, itemIndex, target, opts = {}) {
     (o.status !== before ? \`；主单聚合为 \${o.status}\` : '') };
 }
 
-// 拆单：按供应商 + 最大余额法分摊（金额守恒）
+// 拆单：按子订单等分 + 末项兜底（金额守恒）
 function splitOrder(parentId) {
   const o = S.orders.find(x => x.id === parentId);
   if (!o) return { ok:false, msg:'订单不存在' };
@@ -564,18 +564,13 @@ function createSplit(orderId) {
   const activeSplit = S.splits.find(s => s.orderId === orderId && !['REVOKED','FAILED'].includes(s.status));
   if (activeSplit) return { ok:false, msg:'已存在进行中的分账指令：'+activeSplit.id };
 
-  const rules = [
-    { receiver:'VA_S1001', role:'SUPPLIER', r:0.60, memo:'供货货款 60%' },
-    { receiver:'VA_D2031', role:'DISTRIBUTOR', r:0.20, memo:'一级分销佣金 20%' },
-    { receiver:'VA_P0001', role:'PLATFORM', r:0.10, memo:'平台服务费 10%' },
-    { receiver:'VA_RESERVE', role:'RESERVATION', r:0.10, memo:'逆向售后保证金 10%' },
-  ];
+  const rules = Seed.SPLIT_RULES; // 与种子/推演脚本同源，杜绝多算法
   let sum = 0;
   rules.forEach((r, i) => {
-    const amt = i === rules.length - 1 ? o.amount - sum : Math.round(o.amount * r.r);
+    const amt = i === rules.length - 1 ? o.amount - sum : Math.round(o.amount * r.bps / 10000);
     sum += amt;
     const id = nextId('sp');
-    const key = \`SPLIT_\${orderId}_\${r.receiver}_0001\`;
+    const key = \`SPLIT_\${orderId}_\${r.receiver}_\${String(Number(id.slice(2))).padStart(4, '0')}\`;
     S.splits.unshift({ id, orderId, receiver:r.receiver, role:r.role, amount:amt,
       status:'INIT', key, time:nowStr() });
     addLedger(orderId, r.receiver, 'SPLIT_ACCOUNT', amt, 0, key);
@@ -592,7 +587,9 @@ function pushSplit(splitId) {
   if (!s) return { ok:false, msg:'指令不存在' };
   if (s.status !== 'INIT') return { ok:false, msg:'仅 INIT 状态可推送（当前：'+s.status+'）' };
   s.status = 'PUSHING'; log('INFO', \`分账 \${s.id} 推送渠道中... [PUSHING]\`);
+  const stateAtPush = S;
   setTimeout(() => {
+    if (S !== stateAtPush) return; // 期间 resetState() 则放弃过期回调
     s.status = 'ACCEPTED'; s.time = nowStr();
     const l = S.ledger.find(x => x.key === s.key); if (l) l.status = 1;
     log('OK', \`分账 \${s.id} 渠道受理成功 [ACCEPTED]\`); save();
@@ -610,6 +607,7 @@ function settleSplit(splitId) {
   s.status = 'SUCCESS'; s.time = nowStr();
   const o = S.orders.find(x => x.id === s.orderId);
   if (o && S.splits.filter(x => x.orderId === s.orderId).every(x => x.status === 'SUCCESS')) {
+    o.items.forEach(it => { it.status = 'SETTLED'; });
     o.status = 'SETTLED'; o.version++; log('OK', \`订单 \${shortId(o.id)} 全部分账到账，状态 → SETTLED\`);
   }
   log('OK', \`分账 \${s.id} 资金到账 [SUCCESS]\`); save();
@@ -632,7 +630,9 @@ function refundOrder(orderId, full = true) {
     msg = \`已回退 \${related.length} 笔分账 → \`;
   }
   o.status = 'REFUNDING'; o.refundStatus = 'REFUNDING'; o.version++;
+  const stateAtRefund = S;
   setTimeout(() => {
+    if (S !== stateAtRefund) return; // 期间 resetState() 则放弃过期回调
     o.status = 'CLOSED'; o.refundStatus = 'REFUNDED'; o.version++;
     log('OK', \`订单 \${shortId(orderId)} 退款成功，状态 → CLOSED\`);
     save(); if (typeof render === 'function') render();
@@ -646,6 +646,8 @@ function refundOrder(orderId, full = true) {
 function toggleFreeze(splitId) {
   const s = S.splits.find(x => x.id === splitId);
   if (!s) return { ok:false, msg:'指令不存在' };
+  if (!['ACCEPTED','PROCESSING','PART_SUCCESS','FREEZE'].includes(s.status))
+    return { ok:false, msg:'当前状态不可冻结/解冻：' + s.status };
   if (s.status === 'FREEZE') {
     s.status = 'ACCEPTED'; log('INFO', \`分账 \${s.id} 解冻，恢复 [ACCEPTED]\`);
     save(); return { ok:true, msg:'已解冻' };
@@ -657,6 +659,9 @@ function toggleFreeze(splitId) {
 // 提现
 function withdraw(accountNo, amount) {
   if (!amount || amount <= 0) return { ok:false, msg:'请输入有效金额' };
+  const available = S.ledger.filter(l => l.account === accountNo && l.status === 1)
+    .reduce((a, l) => a + l.amount, 0);
+  if (amount > available) return { ok:false, msg:\`可提现余额不足（\${formatMoney(available)}）\` };
   const id = nextId('wd');
   addLedger('-', accountNo, 'WITHDRAW', -amount, 1, \`WD_\${accountNo}_0001\`);
   log('OK', \`提现 \${formatMoney(amount)} 从 \${accountNo} → 绑定银行卡，流水 \${id}\`);
@@ -694,6 +699,9 @@ function settleCommission(id) {
 function reverseCommission(id) {
   const c = S.commissions.find(x => x.id === id);
   if (!c) return { ok:false, msg:'佣金记录不存在' };
+  if (c.amount <= 0 || S.commissions.some(x => x.order === c.order && x.user === c.user &&
+      x.level === c.level && x.amount === -c.amount && Math.abs(x.rate + c.rate) < 1e-9))
+    return { ok:false, msg:'该佣金已扣回，禁止重复冲正' };
   S.commissions.unshift({ id:nextId('cm'), order:c.order, user:c.user, level:c.level,
     base:c.base, rate:-c.rate, amount:-c.amount, status:'SETTLED', time:nowStr() });
   log('WARN', \`订单 \${c.order} 退款，生成负向佣金单扣回 \${formatMoney(c.amount)}\`);
@@ -997,7 +1005,7 @@ function renderFunds() {
     <td><div class="btn-row">
       \${s.status==='INIT'?\`<button class="btn sm primary" onclick="doPushSplit('\${s.id}')">推送</button>\`:''}
       \${['ACCEPTED','PROCESSING'].includes(s.status)?\`<button class="btn sm green" onclick="doSettleSplit('\${s.id}')">确认到账</button>\`:''}
-      <button class="btn sm" onclick="doFreeze('\${s.id}')">\${s.status==='FREEZE'?'解冻':'冻结'}</button>
+       \${['ACCEPTED','PROCESSING','PART_SUCCESS','FREEZE'].includes(s.status)?\`<button class="btn sm" onclick="doFreeze('\${s.id}')">\${s.status==='FREEZE'?'解冻':'冻结'}</button>\`:''}
     </div></td></tr>\`).join('');
   h += \`</tbody></table></div>
   <div style="padding:14px 20px"><p class="hint">铁律：已分账退款必须先回退（冲正）再退款；UNKNOWN 保持 PUSHING 不臆断终态，原号重发 + 查询兜底。</p></div></div>\`;
@@ -1043,7 +1051,7 @@ function filterReconcile(t) {
 
 function renderReconcile() {
   const pending = S.reconciles.filter(r=>r.status==='PENDING').length;
-  const fixed = S.reconciles.filter(r=>r.status.includes('FIXED')).length;
+  const fixed = S.reconciles.filter(r=>r.status==='AUTO_FIXED').length;
   let h = \`<div class="grid g3">
     <div class="card stat"><div class="label">☷ 对账差异</div><div class="value">\${S.reconciles.length}</div><div class="foot">订单/数量/金额/资金四层</div></div>
     <div class="card stat"><div class="label">⚠ 待处理</div><div class="value \${pending?'heat':'green'}">\${pending}</div><div class="foot">\${S.reconciles.filter(r=>r.risk==='P0').length} 条 P0 高危</div></div>
@@ -1078,9 +1086,9 @@ function renderReconcile() {
 }
 function doRecon(id,act){const r=handleReconcile(id,act);toast(r.msg,!r.ok);render();}
 function runReconcile(){
-  const p=S.products[Math.floor(Math.random()*S.products.length)];
+  const order=S.orders[Math.floor(Math.random()*S.orders.length)];
   S.reconciles.unshift({id:nextId('rc'),date:'2026-11-24',layer:['订单层','数量层','金额层','资金层'][Math.floor(Math.random()*4)],
-    type:'金额不一致',order:p.id,diff:Math.round(Math.random()*50000),status:'PENDING',risk:'P1',time:nowStr()});
+    type:'金额不一致',order:order.id,diff:Math.round(Math.random()*50000),status:'PENDING',risk:'P1',time:nowStr()});
   log('INFO','T+1 对账任务执行完成，发现 1 条新差异，已进入异常池');
   save();render();toast('对账任务执行完成');
 }
@@ -1121,31 +1129,38 @@ function renderCommission() {
   </div></div>\`;
   return h;
 }
-/** 级差核心：rate 用 basis points（2000=20%），金额用整数分，整数除法无浮点。 */
+/** 级差核心：rate 用 basis points（2000=20%），金额用整数分；最大余额法分配取整余差。 */
 function tierLines(saleAmountCents, ratesBps) {
-  const lines = [];
-  for (let i = 0; i < ratesBps.length; i++) {
+  const lines = ratesBps.map((rate, i) => {
     const childRate = i + 1 < ratesBps.length ? ratesBps[i + 1] : 0;
-    const diff = ratesBps[i] - childRate;
-    lines.push({ level: i + 1, diffBps: diff, amountCents: Math.floor(saleAmountCents * diff / 10000) });
-  }
+    const diff = rate - childRate;
+    const raw = saleAmountCents * diff;
+    return { level: i + 1, diffBps: diff, amountCents: Math.floor(raw / 10000), remainder: raw % 10000 };
+  });
+  const expected = Math.floor(saleAmountCents * (ratesBps[0] || 0) / 10000);
+  let left = expected - lines.reduce((a, l) => a + l.amountCents, 0);
+  lines.slice().sort((a, b) => b.remainder - a.remainder || a.level - b.level).forEach(l => {
+    if (left > 0) { l.amountCents += 1; left -= 1; }
+  });
   return lines;
 }
 function tierResultHtml(saleAmountCents, ratesBps) {
   const lines = tierLines(saleAmountCents, ratesBps);
   const total = lines.reduce((a, l) => a + l.amountCents, 0);
-  const expected = Math.floor(saleAmountCents * ratesBps[0] / 10000);
+  const expected = Math.floor(saleAmountCents * (ratesBps[0] || 0) / 10000);
   const ok = total === expected;
   return \`<div class="kv">
     \${lines.map(l => \`<div class="k">第\${['一','二','三','四','五'][l.level-1]||l.level}级（差 \${(l.diffBps/100).toFixed(0)}%）</div><div class="mono">\${money(l.amountCents)} · \${l.amountCents} 分</div>\`).join('')}
     <div class="k">合计</div><div class="mono" style="color:\${ok?'#248a3d':'#d70015'}">\${money(total)} · \${total} 分 \${ok?'✓':'✗'}</div>
-  </div><p class="hint">断言：Σ各级 = 卖单金额 × 最高级比例 = \${expected} 分 \${ok?'（PASS）':'（FAIL）'}</p>\`;
+  </div><p class="hint">断言：Σ各级 = 卖单金额 × 最高级比例 = \${expected} 分 \${ok?'（PASS）':'（FAIL）'}（取整余差按最大余额分配）</p>\`;
 }
 function calcTier() {
   const yuan = parseFloat($('#ctAmount').value) || 0;
   const cents = Math.round(yuan * 100);
   const rates = ($('#ctRates').value || '').split(',').map(s => Math.round((parseFloat(s) || 0) * 100));
-  if (!rates.length || rates.some(r => r < 0)) { toast('请输入有效的层级比例', true); return; }
+  if (!rates.length || rates.some(r => r < 0) || rates.some((r, i) => i > 0 && r > rates[i - 1])) {
+    toast('层级比例需非负且从高到低', true); return;
+  }
   $('#ctResult').innerHTML = tierResultHtml(cents, rates);
   toast('试算完成');
 }
@@ -1260,7 +1275,8 @@ function renderDebugLog(){
     CREATED: ['PAID', 'CANCELLED'],
     PAID: ['ACCEPTED', 'AFTER_SALE_PENDING', 'CANCELLED'],
     ACCEPTED: ['SHIPPED', 'AFTER_SALE_PENDING'],
-    SHIPPED: ['COMPLETED', 'AFTER_SALE_PENDING'],
+    SHIPPED: ['PART_SHIPPED', 'COMPLETED', 'AFTER_SALE_PENDING'],
+    PART_SHIPPED: ['SHIPPED', 'COMPLETED', 'SETTLED', 'AFTER_SALE_PENDING'],
     COMPLETED: ['SETTLED', 'AFTER_SALE_PENDING'],
     SETTLED: ['AFTER_SALE_PENDING'],
     AFTER_SALE_PENDING: ['REFUNDING', 'SHIPPED', 'COMPLETED', 'SETTLED'],
@@ -1290,6 +1306,7 @@ function renderDebugLog(){
     const all = (pred) => ss.length > 0 && ss.every(pred);
     if (all(s => s === 'CLOSED' || s === 'CANCELLED')) return 'CLOSED';
     if (all(s => s === 'CREATED')) return 'CREATED';
+    if (all(s => s === 'SETTLED')) return 'SETTLED';
     if (all(s => s === 'SETTLED' || s === 'COMPLETED')) return 'COMPLETED';
     if (all(s => ['SHIPPED', 'COMPLETED', 'SETTLED'].includes(s))) return 'SHIPPED';
     if (ss.some(s => s === 'SHIPPED' || s === 'COMPLETED' || s === 'SETTLED')) return 'PART_SHIPPED';
@@ -1354,7 +1371,7 @@ function renderDebugLog(){
 
     return {
       version: 2,
-      seq: { order: 124, product: 12, split: 13, ledger: 30, reconcile: 6, commission: 6, log: 30 },
+      seq: { order: 124, product: 12, split: 13, ledger: 30, reconcile: 6, commission: 6, withdraw: 0, log: 30 },
       products: [
         { id: 'SKU1001', name: '无线蓝牙耳机 Pro', supplier: 'S1001 深圳智造', price: 29900, stock: 168, cat: '数码' },
         { id: 'SKU1002', name: '便携咖啡机', supplier: 'S1002 杭州家居', price: 45900, stock: 42, cat: '家电' },
@@ -1418,7 +1435,7 @@ function renderDebugLog(){
   "/js/state.js": { contentType: "application/javascript; charset=UTF-8", body: `/* ========== 全局状态层：种子数据 + 持久化 + 核心业务动作 ========== */
 const STORAGE_KEY = 'dsx_demo_state_v1';
 
-const ORDER_STATES = ['CREATED','PAID','ACCEPTED','SHIPPED','COMPLETED','SETTLED','AFTER_SALE_PENDING','REFUNDING','CLOSED','CANCELLED'];
+const ORDER_STATES = ['CREATED','PAID','ACCEPTED','SHIPPED','PART_SHIPPED','COMPLETED','SETTLED','AFTER_SALE_PENDING','REFUNDING','CLOSED','CANCELLED'];
 const SPLIT_STATES = ['INIT','PUSHING','ACCEPTED','PROCESSING','SUCCESS','PART_SUCCESS','FREEZE','REVOKED','FAILED'];
 const STATE_LABEL = {
   CREATED:'待付款', PAID:'已付款/待发货', ACCEPTED:'已接单', SHIPPED:'已发货',
@@ -1426,7 +1443,7 @@ const STATE_LABEL = {
   CLOSED:'已关闭', CANCELLED:'已取消'
 };
 const STATE_CLASS = {
-  CREATED:'b-creat', PAID:'b-paid', ACCEPTED:'b-cyan', SHIPPED:'b-ship', COMPLETED:'b-done',
+  CREATED:'b-creat', PAID:'b-paid', ACCEPTED:'b-cyan', SHIPPED:'b-ship', PART_SHIPPED:'b-ship', COMPLETED:'b-done',
   SETTLED:'b-done', AFTER_SALE_PENDING:'b-warn', REFUNDING:'b-warn', CLOSED:'b-refund', CANCELLED:'b-refund'
 };
 const SPLIT_CLASS = {
@@ -1444,6 +1461,15 @@ function mkItem(productId, supplier, amount, status) {
   return Seed.mkItem(productId, supplier, amount, status);
 }
 
+function ensureStateShape(d) {
+  const fresh = seedState();
+  d.seq = Object.assign({}, fresh.seq, d.seq || {});
+  ['products','orders','splits','ledger','reconciles','commissions','logs'].forEach(k => {
+    if (!Array.isArray(d[k])) d[k] = fresh[k];
+  });
+  return d;
+}
+
 let S = load();
 function load() {
   try {
@@ -1451,7 +1477,7 @@ function load() {
     if (raw) {
       const d = JSON.parse(raw);
       // 版本迁移：v1 种子含 PAY_SUCCESS 旧口径，且资金指标不自洽；统一重置为 v2
-      if (d && d.version === 2) return d;
+      if (d && d.version === 2) return ensureStateShape(d);
       if (d && d.version === 1) {
         const fresh = seedState();
         localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
@@ -1471,7 +1497,27 @@ function log(level, msg) {
   S.logs.unshift({ id: ++S.seq.log, time: new Date().toISOString().slice(0,19).replace('T',' '), level, msg });
   if (S.logs.length > 80) S.logs.length = 80;
 }
-function nextId(prefix) { return prefix + String(++S.seq[prefix.toLowerCase()] || 1).padStart(6,'0'); }
+// 前缀 → seq 键映射：sp/wd/cm/rc 等简写与种子 seq 的真实键解耦（旧实现会恒为 000001）
+const SEQ_KEY = { sp:'split', wd:'withdraw', cm:'commission', rc:'reconcile',
+  ledger:'ledger', order:'order', product:'product', log:'log' };
+function nextId(prefix) {
+  const key = SEQ_KEY[prefix] || prefix;
+  const n = (Number(S.seq[key]) || 0) + 1;
+  S.seq[key] = n;
+  return prefix + String(n).padStart(6, '0');
+}
+
+// 幂等键生成器（浏览器侧）：与 contract-tests/IdempotentKeyGenerator.java 同构
+class IdempotentKeyGenerator {
+  constructor() { this.registry = new Set(); }
+  generate(prefix, bizKey, seq) {
+    const key = \`\${prefix}_\${bizKey}_\${String(seq).padStart(4, '0')}\`;
+    if (this.registry.has(key)) throw new Error('幂等键重复：' + key);
+    this.registry.add(key);
+    return key;
+  }
+  isSameRequest(a, b) { return a === b; }
+}
 ` },
   "/js/utils.js": { contentType: "application/javascript; charset=UTF-8", body: `/* ========== UI 辅助函数（Apple Liquid Glass 版） ========== */
 const $ = (sel) => document.querySelector(sel);
@@ -1481,7 +1527,7 @@ const money = (c) => '¥' + (Number(c)/100).toFixed(2);
 
 /* 状态 → 语义色：一般灰 / 进行中蓝 / 完成绿 / 警示橙 / 危险红 */
 const STATE_BADGE = {
-  CREATED:'grey', PAID:'blue', ACCEPTED:'blue', SHIPPED:'indigo', COMPLETED:'green',
+  CREATED:'grey', PAID:'blue', ACCEPTED:'blue', SHIPPED:'indigo', PART_SHIPPED:'indigo', COMPLETED:'green',
   SETTLED:'green', AFTER_SALE_PENDING:'heat', REFUNDING:'heat', CLOSED:'red', CANCELLED:'red'
 };
 const SPLIT_BADGE = {
@@ -1535,8 +1581,8 @@ function flowFor(current, states, labels) {
 }
 function orderFlow(status) {
   return flowFor(status,
-    ['CREATED','PAID','ACCEPTED','SHIPPED','COMPLETED','SETTLED'],
-    ['待付款','已付款','已接单','已发货','已完成','已结算']);
+    ['CREATED','PAID','ACCEPTED','PART_SHIPPED','SHIPPED','COMPLETED','SETTLED'],
+    ['待付款','已付款','已接单','部分发货','已发货','已完成','已结算']);
 }
 function splitFlow(status) {
   return flowFor(status,

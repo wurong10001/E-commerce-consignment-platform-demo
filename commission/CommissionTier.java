@@ -4,14 +4,16 @@
  *
  * 金额单位：分（整数）；费率单位：basis points（2000 = 20%）
  * 级差：本级得 (本级比例 − 下级比例)；最低层得全额本级比例
+ * 取整余差按「最大余额法」分配：余数大的层级优先补 1 分，保证 Σ = 顶层比例
  * 期望（100 元 / 20-15-10）：一级 500 分、二级 500 分、三级 1000 分，合计 2000 分
- * 与 reconciliation/03_commission_tier.sql 输出严格一致。
+ * 与 reconciliation/03_commission_tier.sql、demo/js/pages2.js 输出严格一致。
  */
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 public final class CommissionTier {
-    public record CommissionLine(int level, int diffBps, int amountCents) {}
+    public record CommissionLine(int level, int diffBps, long amountCents) {}
 
     /**
      * @param saleAmountCents 卖单金额（分）
@@ -19,13 +21,31 @@ public final class CommissionTier {
      */
     public static List<CommissionLine> calculate(long saleAmountCents, int[] ratesBps) {
         if (ratesBps == null || ratesBps.length == 0) throw new IllegalArgumentException("层级比例不能为空");
-        List<CommissionLine> lines = new ArrayList<>();
+        List<long[]> rows = new ArrayList<>(); // {level, diffBps, amountCents, remainder}
+        long baseSum = 0;
         for (int i = 0; i < ratesBps.length; i++) {
+            if (ratesBps[i] < 0 || (i > 0 && ratesBps[i] > ratesBps[i - 1]))
+                throw new IllegalArgumentException("层级比例需非负且从高到低");
             int childRate = (i + 1 < ratesBps.length) ? ratesBps[i + 1] : 0;
-            int diff = ratesBps[i] - childRate;
-            // 整数除法，杜绝浮点尾差；本例均可整除
-            long amount = saleAmountCents * diff / 10000;
-            lines.add(new CommissionLine(i + 1, diff, (int) amount));
+            long diff = ratesBps[i] - childRate;
+            long raw = saleAmountCents * diff;
+            long base = raw / 10000; // 整数除法，杜绝浮点尾差
+            baseSum += base;
+            rows.add(new long[] { i + 1, diff, base, raw % 10000 });
+        }
+
+        long expected = saleAmountCents * ratesBps[0] / 10000;
+        long left = expected - baseSum;
+        List<long[]> order = new ArrayList<>(rows);
+        order.sort(Comparator.comparingLong((long[] r) -> r[3]).reversed()
+                .thenComparingLong(r -> r[0]));
+        int[] bonus = new int[rows.size()];
+        for (int i = 0; i < left && i < order.size(); i++) bonus[(int) order.get(i)[0] - 1]++;
+
+        List<CommissionLine> lines = new ArrayList<>();
+        for (int i = 0; i < rows.size(); i++) {
+            long[] r = rows.get(i);
+            lines.add(new CommissionLine((int) r[0], (int) r[1], r[2] + bonus[i]));
         }
         return lines;
     }
@@ -34,7 +54,6 @@ public final class CommissionTier {
         long saleAmount = 10000;             // 100.00 元 = 10000 分
         int[] rates = {2000, 1500, 1000};    // 20% / 15% / 10%
         List<CommissionLine> lines = calculate(saleAmount, rates);
-        String[] names = {"一", "二", "三", "四", "五"};
 
         long total = 0;
         for (CommissionLine l : lines) {

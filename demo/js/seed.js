@@ -23,7 +23,8 @@
     CREATED: ['PAID', 'CANCELLED'],
     PAID: ['ACCEPTED', 'AFTER_SALE_PENDING', 'CANCELLED'],
     ACCEPTED: ['SHIPPED', 'AFTER_SALE_PENDING'],
-    SHIPPED: ['COMPLETED', 'AFTER_SALE_PENDING'],
+    SHIPPED: ['PART_SHIPPED', 'COMPLETED', 'AFTER_SALE_PENDING'],
+    PART_SHIPPED: ['SHIPPED', 'COMPLETED', 'SETTLED', 'AFTER_SALE_PENDING'],
     COMPLETED: ['SETTLED', 'AFTER_SALE_PENDING'],
     SETTLED: ['AFTER_SALE_PENDING'],
     AFTER_SALE_PENDING: ['REFUNDING', 'SHIPPED', 'COMPLETED', 'SETTLED'],
@@ -53,6 +54,7 @@
     const all = (pred) => ss.length > 0 && ss.every(pred);
     if (all(s => s === 'CLOSED' || s === 'CANCELLED')) return 'CLOSED';
     if (all(s => s === 'CREATED')) return 'CREATED';
+    if (all(s => s === 'SETTLED')) return 'SETTLED';
     if (all(s => s === 'SETTLED' || s === 'COMPLETED')) return 'COMPLETED';
     if (all(s => ['SHIPPED', 'COMPLETED', 'SETTLED'].includes(s))) return 'SHIPPED';
     if (ss.some(s => s === 'SHIPPED' || s === 'COMPLETED' || s === 'SETTLED')) return 'PART_SHIPPED';
@@ -117,7 +119,7 @@
 
     return {
       version: 2,
-      seq: { order: 124, product: 12, split: 13, ledger: 30, reconcile: 6, commission: 6, log: 30 },
+      seq: { order: 124, product: 12, split: 13, ledger: 30, reconcile: 6, commission: 6, withdraw: 0, log: 30 },
       products: [
         { id: 'SKU1001', name: '无线蓝牙耳机 Pro', supplier: 'S1001 深圳智造', price: 29900, stock: 168, cat: '数码' },
         { id: 'SKU1002', name: '便携咖啡机', supplier: 'S1002 杭州家居', price: 45900, stock: 42, cat: '家电' },

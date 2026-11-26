@@ -6,7 +6,7 @@ const money = (c) => '¥' + (Number(c)/100).toFixed(2);
 
 /* 状态 → 语义色：一般灰 / 进行中蓝 / 完成绿 / 警示橙 / 危险红 */
 const STATE_BADGE = {
-  CREATED:'grey', PAID:'blue', ACCEPTED:'blue', SHIPPED:'indigo', COMPLETED:'green',
+  CREATED:'grey', PAID:'blue', ACCEPTED:'blue', SHIPPED:'indigo', PART_SHIPPED:'indigo', COMPLETED:'green',
   SETTLED:'green', AFTER_SALE_PENDING:'heat', REFUNDING:'heat', CLOSED:'red', CANCELLED:'red'
 };
 const SPLIT_BADGE = {
@@ -60,8 +60,8 @@ function flowFor(current, states, labels) {
 }
 function orderFlow(status) {
   return flowFor(status,
-    ['CREATED','PAID','ACCEPTED','SHIPPED','COMPLETED','SETTLED'],
-    ['待付款','已付款','已接单','已发货','已完成','已结算']);
+    ['CREATED','PAID','ACCEPTED','PART_SHIPPED','SHIPPED','COMPLETED','SETTLED'],
+    ['待付款','已付款','已接单','部分发货','已发货','已完成','已结算']);
 }
 function splitFlow(status) {
   return flowFor(status,

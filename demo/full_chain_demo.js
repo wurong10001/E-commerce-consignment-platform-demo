@@ -47,7 +47,7 @@ function main() {
 
   // ---- 步骤 3：拆单（最大余额法，子单之和 = 父单）----
   step++;
-  console.log(`[step ${step}/8] 拆单：DSO...122 按供应商拆分（最大余额法）`);
+  console.log(`[step ${step}/8] 拆单：DSO...122 按子单等分（末项兜底守恒）`);
   const o122 = byId('DSO20261124000122');
   let allocated = 0;
   o122.items.forEach((it, i) => {
@@ -91,9 +91,14 @@ function main() {
   step++;
   console.log(`[step ${step}/8] 分账推送与到账：4 条 INIT → SUCCESS`);
   const created = st.splits.filter(s => s.orderId === o123.id);
+  const SPLIT_TRANSITIONS = {
+    INIT:['PUSHING'], PUSHING:['ACCEPTED'], ACCEPTED:['PROCESSING','SUCCESS'],
+    PROCESSING:['SUCCESS'], PART_SUCCESS:['SUCCESS'], FREEZE:['ACCEPTED'],
+    SUCCESS:[], REVOKED:[], FAILED:[],
+  };
   created.forEach(s => {
     ['PUSHING', 'ACCEPTED', 'SUCCESS'].forEach(target => {
-      assert(`分账合法流转 ${s.status} → ${target}`, ['PUSHING','ACCEPTED','SUCCESS'].includes(target));
+      assert(`分账合法流转 ${s.status} → ${target}`, (SPLIT_TRANSITIONS[s.status] || []).includes(target));
       s.status = target;
     });
     st.ledger.filter(l => l.key === s.key).forEach(l => l.status = 1);

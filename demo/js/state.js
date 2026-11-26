@@ -1,7 +1,7 @@
 /* ========== 全局状态层：种子数据 + 持久化 + 核心业务动作 ========== */
 const STORAGE_KEY = 'dsx_demo_state_v1';
 
-const ORDER_STATES = ['CREATED','PAID','ACCEPTED','SHIPPED','COMPLETED','SETTLED','AFTER_SALE_PENDING','REFUNDING','CLOSED','CANCELLED'];
+const ORDER_STATES = ['CREATED','PAID','ACCEPTED','SHIPPED','PART_SHIPPED','COMPLETED','SETTLED','AFTER_SALE_PENDING','REFUNDING','CLOSED','CANCELLED'];
 const SPLIT_STATES = ['INIT','PUSHING','ACCEPTED','PROCESSING','SUCCESS','PART_SUCCESS','FREEZE','REVOKED','FAILED'];
 const STATE_LABEL = {
   CREATED:'待付款', PAID:'已付款/待发货', ACCEPTED:'已接单', SHIPPED:'已发货',
@@ -9,7 +9,7 @@ const STATE_LABEL = {
   CLOSED:'已关闭', CANCELLED:'已取消'
 };
 const STATE_CLASS = {
-  CREATED:'b-creat', PAID:'b-paid', ACCEPTED:'b-cyan', SHIPPED:'b-ship', COMPLETED:'b-done',
+  CREATED:'b-creat', PAID:'b-paid', ACCEPTED:'b-cyan', SHIPPED:'b-ship', PART_SHIPPED:'b-ship', COMPLETED:'b-done',
   SETTLED:'b-done', AFTER_SALE_PENDING:'b-warn', REFUNDING:'b-warn', CLOSED:'b-refund', CANCELLED:'b-refund'
 };
 const SPLIT_CLASS = {
@@ -27,6 +27,15 @@ function mkItem(productId, supplier, amount, status) {
   return Seed.mkItem(productId, supplier, amount, status);
 }
 
+function ensureStateShape(d) {
+  const fresh = seedState();
+  d.seq = Object.assign({}, fresh.seq, d.seq || {});
+  ['products','orders','splits','ledger','reconciles','commissions','logs'].forEach(k => {
+    if (!Array.isArray(d[k])) d[k] = fresh[k];
+  });
+  return d;
+}
+
 let S = load();
 function load() {
   try {
@@ -34,7 +43,7 @@ function load() {
     if (raw) {
       const d = JSON.parse(raw);
       // 版本迁移：v1 种子含 PAY_SUCCESS 旧口径，且资金指标不自洽；统一重置为 v2
-      if (d && d.version === 2) return d;
+      if (d && d.version === 2) return ensureStateShape(d);
       if (d && d.version === 1) {
         const fresh = seedState();
         localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
@@ -54,4 +63,24 @@ function log(level, msg) {
   S.logs.unshift({ id: ++S.seq.log, time: new Date().toISOString().slice(0,19).replace('T',' '), level, msg });
   if (S.logs.length > 80) S.logs.length = 80;
 }
-function nextId(prefix) { return prefix + String(++S.seq[prefix.toLowerCase()] || 1).padStart(6,'0'); }
+// 前缀 → seq 键映射：sp/wd/cm/rc 等简写与种子 seq 的真实键解耦（旧实现会恒为 000001）
+const SEQ_KEY = { sp:'split', wd:'withdraw', cm:'commission', rc:'reconcile',
+  ledger:'ledger', order:'order', product:'product', log:'log' };
+function nextId(prefix) {
+  const key = SEQ_KEY[prefix] || prefix;
+  const n = (Number(S.seq[key]) || 0) + 1;
+  S.seq[key] = n;
+  return prefix + String(n).padStart(6, '0');
+}
+
+// 幂等键生成器（浏览器侧）：与 contract-tests/IdempotentKeyGenerator.java 同构
+class IdempotentKeyGenerator {
+  constructor() { this.registry = new Set(); }
+  generate(prefix, bizKey, seq) {
+    const key = `${prefix}_${bizKey}_${String(seq).padStart(4, '0')}`;
+    if (this.registry.has(key)) throw new Error('幂等键重复：' + key);
+    this.registry.add(key);
+    return key;
+  }
+  isSameRequest(a, b) { return a === b; }
+}

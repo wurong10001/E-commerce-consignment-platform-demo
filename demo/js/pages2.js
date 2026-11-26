@@ -21,7 +21,7 @@ function renderFunds() {
     <td><div class="btn-row">
       ${s.status==='INIT'?`<button class="btn sm primary" onclick="doPushSplit('${s.id}')">推送</button>`:''}
       ${['ACCEPTED','PROCESSING'].includes(s.status)?`<button class="btn sm green" onclick="doSettleSplit('${s.id}')">确认到账</button>`:''}
-      <button class="btn sm" onclick="doFreeze('${s.id}')">${s.status==='FREEZE'?'解冻':'冻结'}</button>
+       ${['ACCEPTED','PROCESSING','PART_SUCCESS','FREEZE'].includes(s.status)?`<button class="btn sm" onclick="doFreeze('${s.id}')">${s.status==='FREEZE'?'解冻':'冻结'}</button>`:''}
     </div></td></tr>`).join('');
   h += `</tbody></table></div>
   <div style="padding:14px 20px"><p class="hint">铁律：已分账退款必须先回退（冲正）再退款；UNKNOWN 保持 PUSHING 不臆断终态，原号重发 + 查询兜底。</p></div></div>`;
@@ -67,7 +67,7 @@ function filterReconcile(t) {
 
 function renderReconcile() {
   const pending = S.reconciles.filter(r=>r.status==='PENDING').length;
-  const fixed = S.reconciles.filter(r=>r.status.includes('FIXED')).length;
+  const fixed = S.reconciles.filter(r=>r.status==='AUTO_FIXED').length;
   let h = `<div class="grid g3">
     <div class="card stat"><div class="label">☷ 对账差异</div><div class="value">${S.reconciles.length}</div><div class="foot">订单/数量/金额/资金四层</div></div>
     <div class="card stat"><div class="label">⚠ 待处理</div><div class="value ${pending?'heat':'green'}">${pending}</div><div class="foot">${S.reconciles.filter(r=>r.risk==='P0').length} 条 P0 高危</div></div>
@@ -102,9 +102,9 @@ function renderReconcile() {
 }
 function doRecon(id,act){const r=handleReconcile(id,act);toast(r.msg,!r.ok);render();}
 function runReconcile(){
-  const p=S.products[Math.floor(Math.random()*S.products.length)];
+  const order=S.orders[Math.floor(Math.random()*S.orders.length)];
   S.reconciles.unshift({id:nextId('rc'),date:'2026-11-24',layer:['订单层','数量层','金额层','资金层'][Math.floor(Math.random()*4)],
-    type:'金额不一致',order:p.id,diff:Math.round(Math.random()*50000),status:'PENDING',risk:'P1',time:nowStr()});
+    type:'金额不一致',order:order.id,diff:Math.round(Math.random()*50000),status:'PENDING',risk:'P1',time:nowStr()});
   log('INFO','T+1 对账任务执行完成，发现 1 条新差异，已进入异常池');
   save();render();toast('对账任务执行完成');
 }
@@ -145,31 +145,38 @@ function renderCommission() {
   </div></div>`;
   return h;
 }
-/** 级差核心：rate 用 basis points（2000=20%），金额用整数分，整数除法无浮点。 */
+/** 级差核心：rate 用 basis points（2000=20%），金额用整数分；最大余额法分配取整余差。 */
 function tierLines(saleAmountCents, ratesBps) {
-  const lines = [];
-  for (let i = 0; i < ratesBps.length; i++) {
+  const lines = ratesBps.map((rate, i) => {
     const childRate = i + 1 < ratesBps.length ? ratesBps[i + 1] : 0;
-    const diff = ratesBps[i] - childRate;
-    lines.push({ level: i + 1, diffBps: diff, amountCents: Math.floor(saleAmountCents * diff / 10000) });
-  }
+    const diff = rate - childRate;
+    const raw = saleAmountCents * diff;
+    return { level: i + 1, diffBps: diff, amountCents: Math.floor(raw / 10000), remainder: raw % 10000 };
+  });
+  const expected = Math.floor(saleAmountCents * (ratesBps[0] || 0) / 10000);
+  let left = expected - lines.reduce((a, l) => a + l.amountCents, 0);
+  lines.slice().sort((a, b) => b.remainder - a.remainder || a.level - b.level).forEach(l => {
+    if (left > 0) { l.amountCents += 1; left -= 1; }
+  });
   return lines;
 }
 function tierResultHtml(saleAmountCents, ratesBps) {
   const lines = tierLines(saleAmountCents, ratesBps);
   const total = lines.reduce((a, l) => a + l.amountCents, 0);
-  const expected = Math.floor(saleAmountCents * ratesBps[0] / 10000);
+  const expected = Math.floor(saleAmountCents * (ratesBps[0] || 0) / 10000);
   const ok = total === expected;
   return `<div class="kv">
     ${lines.map(l => `<div class="k">第${['一','二','三','四','五'][l.level-1]||l.level}级（差 ${(l.diffBps/100).toFixed(0)}%）</div><div class="mono">${money(l.amountCents)} · ${l.amountCents} 分</div>`).join('')}
     <div class="k">合计</div><div class="mono" style="color:${ok?'#248a3d':'#d70015'}">${money(total)} · ${total} 分 ${ok?'✓':'✗'}</div>
-  </div><p class="hint">断言：Σ各级 = 卖单金额 × 最高级比例 = ${expected} 分 ${ok?'（PASS）':'（FAIL）'}</p>`;
+  </div><p class="hint">断言：Σ各级 = 卖单金额 × 最高级比例 = ${expected} 分 ${ok?'（PASS）':'（FAIL）'}（取整余差按最大余额分配）</p>`;
 }
 function calcTier() {
   const yuan = parseFloat($('#ctAmount').value) || 0;
   const cents = Math.round(yuan * 100);
   const rates = ($('#ctRates').value || '').split(',').map(s => Math.round((parseFloat(s) || 0) * 100));
-  if (!rates.length || rates.some(r => r < 0)) { toast('请输入有效的层级比例', true); return; }
+  if (!rates.length || rates.some(r => r < 0) || rates.some((r, i) => i > 0 && r > rates[i - 1])) {
+    toast('层级比例需非负且从高到低', true); return;
+  }
   $('#ctResult').innerHTML = tierResultHtml(cents, rates);
   toast('试算完成');
 }
